@@ -4,12 +4,15 @@ require("dotenv").config();
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
 
 const { Server } = require("socket.io");
 
 const connectDB = require("./config/db");
 
 const Room = require("./models/Room");
+const File = require("./models/File");
 
 const roomRoutes = require("./routes/roomRoutes");
 const fileRoutes = require("./routes/fileRoutes");
@@ -17,30 +20,20 @@ const fileRoutes = require("./routes/fileRoutes");
 const app = express();
 const server = http.createServer(app);
 
-// ===============================
-// MIDDLEWARE
-// ===============================
-
-const allowedOrigins = (
-    process.env.CLIENT_URL || "http://localhost:5173"
-)
-    .split(",")
-    .map((origin) => origin.trim());
+const allowedOrigins = process.env.CLIENT_URL
+    ? process.env.CLIENT_URL.split(",").map((url) => url.trim())
+    : ["http://localhost:5173"];
 
 app.use(
     cors({
         origin: allowedOrigins,
         methods: ["GET", "POST", "PUT", "DELETE"],
         credentials: true,
-    }),
+    })
 );
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// ===============================
-// SOCKET.IO
-// ===============================
 
 const io = new Server(server, {
     cors: {
@@ -48,152 +41,190 @@ const io = new Server(server, {
         methods: ["GET", "POST"],
         credentials: true,
     },
-    maxHttpBufferSize: 1e8,
 });
-
-// ===============================
-// ROOM STATES
-// ===============================
 
 const roomStates = new Map();
 
 app.set("roomStates", roomStates);
 
-// Room state structure:
-//
-// {
-//   devices: Map(),
-//   hostDeviceId: null,
-//   removedDevices: Set(),
-//   requests: Map(),
-//   closing: false
-// }
-
-// ===============================
+// --------------------------------------------------
 // ROOM HELPERS
-// ===============================
+// --------------------------------------------------
 
-const getRoomState = (roomId) => {
+function getRoomState(roomId) {
     if (!roomStates.has(roomId)) {
         roomStates.set(roomId, {
-            devices: new Map(),
+            devices: [],
             hostDeviceId: null,
-            removedDevices: new Set(),
-            requests: new Map(),
+            removedDevices: [],
+            requests: [],
             closing: false,
         });
     }
 
     return roomStates.get(roomId);
-};
+}
 
-// ===============================
-// GET ONLINE DEVICES
-// ===============================
+function getOnlineDevices(roomId) {
+    const state = roomStates.get(roomId);
 
-const getOnlineDevices = (state) => {
-    return Array.from(state.devices.values()).map((device) => ({
+    if (!state) return [];
+
+    return state.devices;
+}
+
+function broadcastDevices(roomId) {
+    const state = roomStates.get(roomId);
+
+    if (!state) return;
+
+    const devices = state.devices.map((device) => ({
         deviceId: device.deviceId,
         deviceName: device.deviceName,
         isHost: device.deviceId === state.hostDeviceId,
-        socketCount: device.sockets.size,
     }));
-};
-
-// ===============================
-// BROADCAST DEVICE DETAILS
-// ===============================
-
-const broadcastDevices = (roomId) => {
-    const state = roomStates.get(roomId);
-
-    if (!state) return;
-
-    const devices = getOnlineDevices(state);
 
     io.to(roomId).emit("device-list", devices);
+    io.to(roomId).emit("device-count", devices.length);
+}
 
-    io.to(roomId).emit("device-count", {
-        count: devices.length,
-    });
-};
-
-// ===============================
-// FIND DEVICE BY SOCKET
-// ===============================
-
-const getDeviceBySocket = (socket) => {
-    const roomId = socket.data.roomId;
-    const deviceId = socket.data.deviceId;
-
-    if (!roomId || !deviceId) return null;
-
-    const state = roomStates.get(roomId);
-
-    if (!state) return null;
-
-    const device = state.devices.get(deviceId);
-
-    if (!device || !device.sockets.has(socket.id)) {
-        return null;
-    }
-
-    return { roomId, state, device };
-};
-
-// ===============================
-// HOST TRANSFER
-// ===============================
-
-const transferHost = (roomId) => {
-    const state = roomStates.get(roomId);
-
-    if (!state) return;
-
-    const availableDevices = Array.from(state.devices.values()).filter(
-        (device) => device.sockets.size > 0,
+function getDeviceBySocket(state, socketId) {
+    return state.devices.find(
+        (device) => device.socketId === socketId
     );
+}
 
-    if (availableDevices.length === 0) {
-        state.hostDeviceId = null;
+// --------------------------------------------------
+// HOST TRANSFER
+// --------------------------------------------------
+
+function transferHost(roomId) {
+    const state = roomStates.get(roomId);
+
+    if (!state || state.devices.length === 0) {
         return;
     }
 
-    const newHost = availableDevices[0];
+    const newHost = state.devices[0];
 
     state.hostDeviceId = newHost.deviceId;
 
     io.to(roomId).emit("host-changed", {
-        hostDeviceName: newHost.deviceName,
         hostDeviceId: newHost.deviceId,
+        hostName: newHost.deviceName,
     });
 
     broadcastDevices(roomId);
-};
+}
 
-// ===============================
+// --------------------------------------------------
 // NOTIFY HOST
-// ===============================
+// --------------------------------------------------
 
-const notifyHost = (roomId, event, data) => {
+function notifyHost(roomId) {
     const state = roomStates.get(roomId);
 
     if (!state || !state.hostDeviceId) return;
 
-    const host = state.devices.get(state.hostDeviceId);
+    const host = state.devices.find(
+        (device) => device.deviceId === state.hostDeviceId
+    );
 
     if (!host) return;
 
-    host.sockets.forEach((socketId) => {
-        io.to(socketId).emit(event, data);
-    });
-};
+    const hostSocket = io.sockets.sockets.get(host.socketId);
 
-// ===============================
+    if (hostSocket) {
+        hostSocket.emit("device-approval-request", {
+            requests: state.requests,
+        });
+    }
+}
+
+// --------------------------------------------------
+// DELETE ROOM COMPLETELY
+// Only called when the LAST member leaves
+// --------------------------------------------------
+
+async function deleteRoomCompletely(roomId) {
+    const state = roomStates.get(roomId);
+
+    if (!state || state.closing) return;
+
+    state.closing = true;
+
+    try {
+        console.log(`Deleting empty room: ${roomId}`);
+
+        // Disconnect pending approval sockets
+        for (const request of state.requests) {
+            const pendingSocket = io.sockets.sockets.get(
+                request.socketId
+            );
+
+            if (pendingSocket) {
+                pendingSocket.emit("room-closed", {
+                    message: "This room has been closed.",
+                });
+
+                pendingSocket.leave(roomId);
+            }
+        }
+
+        // Get all files belonging to this room
+        const roomFiles = await File.find({ roomId });
+
+        const uploadDirectory = path.join(__dirname, "uploads");
+
+        // Delete uploaded files from disk
+        for (const file of roomFiles) {
+            const storedName = path.basename(file.storedName);
+            const filePath = path.join(uploadDirectory, storedName);
+
+            try {
+                await fs.promises.unlink(filePath);
+            } catch (error) {
+                if (error.code !== "ENOENT") {
+                    console.error("File deletion error:", error.message);
+                }
+            }
+        }
+
+        // Delete file records from MongoDB
+        await File.deleteMany({ roomId });
+
+        // Delete room record from MongoDB
+        await Room.deleteOne({ roomId });
+
+        // Notify connected clients
+        io.to(roomId).emit("room-closed", {
+            message: "Room has been closed.",
+        });
+
+        // Remove socket room membership
+        const sockets = await io.in(roomId).fetchSockets();
+
+        for (const socket of sockets) {
+            socket.leave(roomId);
+        }
+
+        // Remove in-memory room state
+        roomStates.delete(roomId);
+
+        console.log(`Room ${roomId} deleted successfully`);
+    } catch (error) {
+        console.error("Room cleanup error:", error);
+
+        // Allow cleanup to be retried if it failed
+        state.closing = false;
+    }
+}
+
+// --------------------------------------------------
 // REMOVE SOCKET FROM ROOM
-// ===============================
+// --------------------------------------------------
 
-const removeSocketFromRoom = (socket) => {
+async function removeSocketFromRoom(socket, reason = "leave") {
     const roomId = socket.data.roomId;
     const deviceId = socket.data.deviceId;
 
@@ -201,118 +232,139 @@ const removeSocketFromRoom = (socket) => {
 
     const state = roomStates.get(roomId);
 
-    if (!state) return;
+    if (!state || state.closing) return;
 
-    // Remove pending request if applicable
+    // Remove pending request if it exists
+    state.requests = state.requests.filter(
+        (request) => request.deviceId !== deviceId
+    );
 
-    const request = state.requests.get(deviceId);
-
-    if (request && request.socketId === socket.id) {
-        state.requests.delete(deviceId);
-    }
-
-    const device = state.devices.get(deviceId);
+    const device = state.devices.find(
+        (item) => item.deviceId === deviceId
+    );
 
     if (!device) {
         socket.leave(roomId);
         socket.data.roomId = null;
         socket.data.deviceId = null;
+
+        notifyHost(roomId);
         return;
     }
 
-    device.sockets.delete(socket.id);
+    const wasHost = state.hostDeviceId === deviceId;
+
+    state.devices = state.devices.filter(
+        (item) => item.deviceId !== deviceId
+    );
 
     socket.leave(roomId);
 
     socket.data.roomId = null;
     socket.data.deviceId = null;
 
-    // Other tabs/devices with the same device ID are still connected
+    // Notify remaining members
+    io.to(roomId).emit("device-removed", {
+        deviceId,
+        deviceName: device.deviceName,
+        reason,
+    });
 
-    if (device.sockets.size > 0) {
-        broadcastDevices(roomId);
+    // LAST MEMBER LEFT
+    if (state.devices.length === 0) {
+        await deleteRoomCompletely(roomId);
         return;
     }
 
-    state.devices.delete(deviceId);
-
-    // Transfer host if the host disconnected
-
-    if (state.hostDeviceId === deviceId) {
+    // Transfer host if the host leaves
+    if (wasHost) {
         transferHost(roomId);
+    } else {
+        broadcastDevices(roomId);
     }
 
-    broadcastDevices(roomId);
+    notifyHost(roomId);
+}
 
-    // Remove empty room state from memory
-
-    if (state.devices.size === 0 && state.requests.size === 0) {
-        roomStates.delete(roomId);
-    }
-};
-
-// ===============================
-// SOCKET CONNECTION
-// ===============================
+// --------------------------------------------------
+// JOIN ROOM
+// --------------------------------------------------
 
 io.on("connection", (socket) => {
-    console.log("Socket Connected:", socket.id);
-
-    // =============================
-    // JOIN ROOM
-    // =============================
+    console.log("Device connected:", socket.id);
 
     socket.on("join-room", async (data) => {
         try {
-            const cleanRoomId = String(data?.roomId || "")
+            const cleanRoomId = String(data.roomId || "")
                 .trim()
                 .toUpperCase();
 
-            const deviceId = String(data?.deviceId || "").trim();
+            const deviceId = String(data.deviceId || "").trim();
 
             const deviceName = String(
-                data?.deviceName || "Unknown Device",
+                data.deviceName || "Unknown Device"
             ).trim();
 
             if (!cleanRoomId || !deviceId) {
-                socket.emit("room-error", "Invalid Room ID");
+                socket.emit("room-error", {
+                    message: "Invalid room details.",
+                });
                 return;
             }
-
-            // Check room in MongoDB
 
             const room = await Room.findOne({
                 roomId: cleanRoomId,
             });
 
-            if (!room || room.active === false) {
-                socket.emit("room-error", "Invalid Room ID");
+            if (!room) {
+                socket.emit("room-error", {
+                    message: "Room not found.",
+                });
                 return;
             }
 
             const state = getRoomState(cleanRoomId);
 
             if (state.closing) {
-                socket.emit("room-error", "Room is closing");
+                socket.emit("room-error", {
+                    message: "Room is being closed. Try again later.",
+                });
                 return;
             }
 
-            // Previously removed device cannot rejoin
+            // Avoid joining another room without leaving the old one
+            if (
+                socket.data.roomId &&
+                socket.data.roomId !== cleanRoomId
+            ) {
+                await removeSocketFromRoom(socket, "switch-room");
+            }
 
-            if (state.removedDevices.has(deviceId)) {
-                socket.emit(
-                    "room-error",
-                    "You have been removed from this room",
-                );
+            // Check whether device was removed earlier
+            if (state.removedDevices.includes(deviceId)) {
+                socket.emit("room-error", {
+                    message: "You have been removed from this room.",
+                });
                 return;
             }
 
-            // Existing approved device reconnecting
-
-            const existingDevice = state.devices.get(deviceId);
+            // Existing device reconnect
+            const existingDevice = state.devices.find(
+                (device) => device.deviceId === deviceId
+            );
 
             if (existingDevice) {
-                existingDevice.sockets.add(socket.id);
+                const oldSocket = io.sockets.sockets.get(
+                    existingDevice.socketId
+                );
+
+                if (oldSocket && oldSocket.id !== socket.id) {
+                    oldSocket.leave(cleanRoomId);
+                    oldSocket.data.roomId = null;
+                    oldSocket.data.deviceId = null;
+                }
+
+                existingDevice.socketId = socket.id;
                 existingDevice.deviceName = deviceName;
 
                 socket.data.roomId = cleanRoomId;
@@ -328,21 +380,15 @@ io.on("connection", (socket) => {
                 });
 
                 broadcastDevices(cleanRoomId);
-
-                console.log(
-                    `${deviceName} reconnected to room ${cleanRoomId}`,
-                );
-
                 return;
             }
 
-            // First device becomes host
-
-            if (state.devices.size === 0 && !state.hostDeviceId) {
-                state.devices.set(deviceId, {
+            // First member becomes host
+            if (state.devices.length === 0) {
+                state.devices.push({
                     deviceId,
                     deviceName,
-                    sockets: new Set([socket.id]),
+                    socketId: socket.id,
                 });
 
                 state.hostDeviceId = deviceId;
@@ -360,298 +406,251 @@ io.on("connection", (socket) => {
                 });
 
                 broadcastDevices(cleanRoomId);
-
-                console.log(
-                    `${deviceName} created host connection for ${cleanRoomId}`,
-                );
-
                 return;
             }
 
-            // Existing pending request
+            // New device waits for host approval
+            const alreadyRequested = state.requests.some(
+                (request) => request.deviceId === deviceId
+            );
 
-            const existingRequest = state.requests.get(deviceId);
-
-            if (existingRequest) {
-                existingRequest.socketId = socket.id;
-                existingRequest.deviceName = deviceName;
-
-                socket.emit("approval-pending", {
-                    message: "Waiting for Host Approval",
-                });
-
-                notifyHost(cleanRoomId, "device-approval-request", {
+            if (!alreadyRequested) {
+                state.requests.push({
                     deviceId,
                     deviceName,
+                    socketId: socket.id,
                 });
-
-                return;
             }
-
-            // New device requests approval
-
-            state.requests.set(deviceId, {
-                deviceId,
-                deviceName,
-                socketId: socket.id,
-            });
 
             socket.data.roomId = cleanRoomId;
             socket.data.deviceId = deviceId;
 
             socket.emit("approval-pending", {
-                message: "Waiting for Host Approval",
+                message: "Waiting for host approval.",
             });
 
-            notifyHost(cleanRoomId, "device-approval-request", {
-                deviceId,
-                deviceName,
-            });
-
-            console.log(
-                `${deviceName} requested access to ${cleanRoomId}`,
-            );
+            notifyHost(cleanRoomId);
         } catch (error) {
-            console.error("Join Room Error:", error);
+            console.error("Join room error:", error);
 
-            socket.emit("room-error", "Unable to join room");
+            socket.emit("room-error", {
+                message: "Unable to join room.",
+            });
         }
     });
 
-    // =============================
+    // ------------------------------------------------
     // APPROVE DEVICE
-    // =============================
+    // ------------------------------------------------
 
-    socket.on("approve-device", async ({ deviceId: targetDeviceId }) => {
+    socket.on("approve-device", async (data) => {
         try {
-            const hostInfo = getDeviceBySocket(socket);
+            const roomId = socket.data.roomId;
+            const state = roomStates.get(roomId);
 
-            if (!hostInfo) return;
+            if (!state || state.closing) return;
 
-            const { roomId, state } = hostInfo;
+            const host = getDeviceBySocket(state, socket.id);
 
-            if (state.hostDeviceId !== socket.data.deviceId) {
-                socket.emit("host-action-error", "Only host can approve devices");
+            if (!host || state.hostDeviceId !== host.deviceId) {
+                socket.emit("host-action-error", {
+                    message: "Only the host can approve devices.",
+                });
                 return;
             }
 
-            const request = state.requests.get(targetDeviceId);
+            const request = state.requests.find(
+                (item) => item.deviceId === data.deviceId
+            );
 
             if (!request) return;
 
-            const targetSocket = io.sockets.sockets.get(request.socketId);
+            const pendingSocket = io.sockets.sockets.get(
+                request.socketId
+            );
 
-            if (!targetSocket || !targetSocket.connected) {
-                state.requests.delete(targetDeviceId);
-                broadcastDevices(roomId);
+            if (!pendingSocket || !pendingSocket.connected) {
+                state.requests = state.requests.filter(
+                    (item) => item.deviceId !== data.deviceId
+                );
+
+                notifyHost(roomId);
                 return;
             }
 
-            state.requests.delete(targetDeviceId);
-
-            state.devices.set(targetDeviceId, {
-                deviceId: targetDeviceId,
-                deviceName: request.deviceName,
-                sockets: new Set([targetSocket.id]),
-            });
-
-            targetSocket.data.roomId = roomId;
-            targetSocket.data.deviceId = targetDeviceId;
-
-            targetSocket.join(roomId);
+            state.requests = state.requests.filter(
+                (item) => item.deviceId !== data.deviceId
+            );
 
             const room = await Room.findOne({ roomId });
 
-            targetSocket.emit("room-joined", {
+            if (!room || state.closing) return;
+
+            state.devices.push({
+                deviceId: request.deviceId,
+                deviceName: request.deviceName,
+                socketId: request.socketId,
+            });
+
+            pendingSocket.join(roomId);
+
+            pendingSocket.emit("approval-granted", {
+                message: "Your request has been approved.",
+            });
+
+            pendingSocket.emit("room-joined", {
                 roomId,
-                roomName: room?.roomName || "My Shared Room",
-                deviceId: targetDeviceId,
+                roomName: room.roomName || "My Shared Room",
+                deviceId: request.deviceId,
                 deviceName: request.deviceName,
             });
 
-            targetSocket.emit("approval-granted", {
-                message: "Host approved your request",
-            });
-
             broadcastDevices(roomId);
-
-            console.log(
-                `${request.deviceName} approved for room ${roomId}`,
-            );
+            notifyHost(roomId);
         } catch (error) {
-            console.error("Approve Device Error:", error);
-
-            socket.emit("host-action-error", "Unable to approve device");
+            console.error("Approve device error:", error);
         }
     });
 
-    // =============================
+    // ------------------------------------------------
     // REJECT DEVICE
-    // =============================
+    // ------------------------------------------------
 
-    socket.on("reject-device", ({ deviceId: targetDeviceId }) => {
-        const hostInfo = getDeviceBySocket(socket);
+    socket.on("reject-device", (data) => {
+        const roomId = socket.data.roomId;
+        const state = roomStates.get(roomId);
 
-        if (!hostInfo) return;
+        if (!state || state.closing) return;
 
-        const { roomId, state } = hostInfo;
+        const host = getDeviceBySocket(state, socket.id);
 
-        if (state.hostDeviceId !== socket.data.deviceId) {
-            socket.emit("host-action-error", "Only host can reject devices");
-            return;
-        }
+        if (!host || state.hostDeviceId !== host.deviceId) return;
 
-        const request = state.requests.get(targetDeviceId);
+        const request = state.requests.find(
+            (item) => item.deviceId === data.deviceId
+        );
 
         if (!request) return;
 
-        const targetSocket = io.sockets.sockets.get(request.socketId);
+        const pendingSocket = io.sockets.sockets.get(
+            request.socketId
+        );
 
-        if (targetSocket) {
-            targetSocket.emit("approval-rejected", {
-                message: "Your room access request was rejected",
+        if (pendingSocket) {
+            pendingSocket.emit("approval-rejected", {
+                message: "Your request was rejected.",
             });
 
-            targetSocket.data.roomId = null;
-            targetSocket.data.deviceId = null;
+            pendingSocket.data.roomId = null;
+            pendingSocket.data.deviceId = null;
         }
 
-        state.requests.delete(targetDeviceId);
-
-        console.log(
-            `Device ${targetDeviceId} rejected from ${roomId}`,
+        state.requests = state.requests.filter(
+            (item) => item.deviceId !== data.deviceId
         );
+
+        notifyHost(roomId);
     });
 
-    // =============================
+    // ------------------------------------------------
     // HOST REMOVE DEVICE
-    // =============================
+    // ------------------------------------------------
 
-    socket.on(
-        "host-remove-device",
-        ({ deviceId: targetDeviceId }) => {
-            const hostInfo = getDeviceBySocket(socket);
+    socket.on("host-remove-device", async (data) => {
+        const roomId = socket.data.roomId;
+        const state = roomStates.get(roomId);
 
-            if (!hostInfo) return;
+        if (!state || state.closing) return;
 
-            const { roomId, state } = hostInfo;
+        const host = getDeviceBySocket(state, socket.id);
 
-            if (state.hostDeviceId !== socket.data.deviceId) {
-                socket.emit("host-action-error", "Only host can remove devices");
-                return;
-            }
+        if (!host || state.hostDeviceId !== host.deviceId) {
+            socket.emit("host-action-error", {
+                message: "Only the host can remove devices.",
+            });
+            return;
+        }
 
-            if (targetDeviceId === state.hostDeviceId) {
-                socket.emit(
-                    "host-action-error",
-                    "Host device cannot be removed",
-                );
-                return;
-            }
+        const target = state.devices.find(
+            (device) => device.deviceId === data.deviceId
+        );
 
-            const targetDevice = state.devices.get(targetDeviceId);
+        if (!target || target.deviceId === state.hostDeviceId) return;
 
-            if (!targetDevice) return;
+        state.removedDevices.push(target.deviceId);
 
-            state.removedDevices.add(targetDeviceId);
-            state.devices.delete(targetDeviceId);
+        const targetSocket = io.sockets.sockets.get(
+            target.socketId
+        );
 
-            targetDevice.sockets.forEach((socketId) => {
-                const targetSocket = io.sockets.sockets.get(socketId);
-
-                if (targetSocket) {
-                    targetSocket.emit("device-removed", {
-                        message: "Host removed you from this room",
-                    });
-
-                    targetSocket.leave(roomId);
-
-                    targetSocket.data.roomId = null;
-                    targetSocket.data.deviceId = null;
-                }
+        if (targetSocket) {
+            targetSocket.emit("device-removed", {
+                deviceId: target.deviceId,
+                message: "You have been removed from this room.",
             });
 
-            broadcastDevices(roomId);
-
-            console.log(
-                `Device ${targetDeviceId} removed from ${roomId}`,
+            await removeSocketFromRoom(targetSocket, "removed");
+        } else {
+            state.devices = state.devices.filter(
+                (device) => device.deviceId !== target.deviceId
             );
-        },
-    );
 
-    // =============================
-    // LEAVE ROOM
-    // =============================
-
-    socket.on("leave-room", () => {
-        const roomId = socket.data.roomId;
-
-        if (!roomId) return;
-
-        removeSocketFromRoom(socket);
-
-        console.log(`Socket ${socket.id} left room ${roomId}`);
+            broadcastDevices(roomId);
+        }
     });
 
-    // =============================
+    // ------------------------------------------------
+    // LEAVE ROOM
+    // ------------------------------------------------
+
+    socket.on("leave-room", async () => {
+        await removeSocketFromRoom(socket, "leave");
+    });
+
+    // ------------------------------------------------
     // DISCONNECT
-    // =============================
+    // ------------------------------------------------
 
-    socket.on("disconnect", () => {
-        console.log("Socket Disconnected:", socket.id);
+    socket.on("disconnect", async () => {
+        console.log("Device disconnected:", socket.id);
 
-        removeSocketFromRoom(socket);
+        await removeSocketFromRoom(socket, "disconnect");
     });
 });
 
-// ===============================
+// --------------------------------------------------
 // API ROUTES
-// ===============================
+// --------------------------------------------------
 
 app.use("/api/rooms", roomRoutes);
 app.use("/api/files", fileRoutes);
 
-// ===============================
-// HEALTH CHECK
-// ===============================
-
 app.get("/", (req, res) => {
-    res.status(200).json({
-        success: true,
-        message: "ShareRoom Server is Running",
+    res.json({
+        message: "ShareRoom Server Running Successfully",
     });
 });
 
-// ===============================
+// --------------------------------------------------
 // ERROR HANDLER
-// ===============================
+// --------------------------------------------------
 
 app.use((error, req, res, next) => {
-    console.error("Server Error:", error);
+    console.error("Server error:", error);
 
-    res.status(error.status || 500).json({
-        success: false,
-        message: error.message || "Internal Server Error",
+    res.status(500).json({
+        message: "Internal Server Error",
     });
 });
 
-// ===============================
-// DATABASE + SERVER START
-// ===============================
+// --------------------------------------------------
+// START SERVER
+// --------------------------------------------------
 
 const PORT = process.env.PORT || 5000;
 
-const startServer = async () => {
-    try {
-        await connectDB();
-
-        server.listen(PORT, "0.0.0.0", () => {
-            console.log(`ShareRoom Server running on port ${PORT}`);
-        });
-    } catch (error) {
-        console.error("Server Startup Error:", error);
-        process.exit(1);
-    }
-};
-
-startServer();
+connectDB().then(() => {
+    server.listen(PORT, "0.0.0.0", () => {
+        console.log(`ShareRoom server running on port ${PORT}`);
+    });
+});
