@@ -58,6 +58,8 @@ export default function App() {
     () => localStorage.getItem("shareroom_roomId") || "",
   );
 
+  const [roomName, setRoomName] = useState("My Shared Room");
+
   const [joined, setJoined] = useState(false);
   const [connected, setConnected] = useState(false);
 
@@ -147,6 +149,7 @@ export default function App() {
       const joinedRoom = data.roomId.toUpperCase();
 
       setRoomId(joinedRoom);
+      setRoomName(data.roomName || "My Shared Room");
       setJoined(true);
       setPendingApproval(false);
       setMessage("");
@@ -168,6 +171,7 @@ export default function App() {
       if (error === "Invalid Room ID") {
         localStorage.removeItem("shareroom_roomId");
         setRoomId("");
+        setRoomName("My Shared Room");
       }
     });
 
@@ -260,6 +264,14 @@ export default function App() {
       });
     });
 
+    // FILE DELETED - REAL TIME UPDATE
+
+    socket.on("file-deleted", ({ fileId }) => {
+      setFiles((previous) => previous.filter((file) => file._id !== fileId));
+
+      console.log("File deleted:", fileId);
+    });
+
     return () => {
       socket.disconnect();
       socketRef.current = null;
@@ -287,7 +299,7 @@ export default function App() {
 
   // CONNECT ROOM
 
-  const connectRoom = (id) => {
+  const connectRoom = (id, name = "My Shared Room") => {
     const cleanId = id.trim().toUpperCase();
 
     if (!cleanId) {
@@ -307,6 +319,7 @@ export default function App() {
     setPendingApproval(false);
     setJoined(false);
     setRoomId(cleanId);
+    setRoomName(name);
 
     socketRef.current.emit("join-room", {
       roomId: cleanId,
@@ -317,13 +330,15 @@ export default function App() {
 
   // CREATE ROOM
 
-  const createRoom = async (roomName) => {
+  const createRoom = async (name) => {
     try {
       const response = await axios.post(`${API_URL}/rooms/create`, {
-        roomName,
+        roomName: name,
       });
 
-      connectRoom(response.data.room.roomId);
+      const room = response.data.room;
+
+      connectRoom(room.roomId, room.roomName);
     } catch (error) {
       console.error("Create Room Error:", error);
 
@@ -339,7 +354,9 @@ export default function App() {
 
       const response = await axios.get(`${API_URL}/rooms/join/${cleanId}`);
 
-      connectRoom(response.data.room.roomId);
+      const room = response.data.room;
+
+      connectRoom(room.roomId, room.roomName);
     } catch (error) {
       console.error("Join Room Error:", error);
 
@@ -522,6 +539,7 @@ export default function App() {
     localStorage.removeItem("shareroom_roomId");
 
     setRoomId("");
+    setRoomName("My Shared Room");
     setJoined(false);
     setFiles([]);
     setDevices([]);
@@ -660,6 +678,7 @@ export default function App() {
         {message && (
           <div className="message-banner">
             <span>{message}</span>
+
             <button onClick={() => setMessage("")}>×</button>
           </div>
         )}
@@ -668,6 +687,7 @@ export default function App() {
 
         <RoomPanel
           roomId={joined ? roomId : ""}
+          roomName={roomName}
           onCreate={createRoom}
           onJoin={joinRoom}
         />
@@ -743,6 +763,7 @@ export default function App() {
                 <div className="upload-dashboard-heading">
                   <div>
                     <h2>Upload Progress</h2>
+
                     <p>
                       {completedUploads} completed
                       {" · "}
@@ -762,9 +783,7 @@ export default function App() {
                   <div className="upload-overall-track">
                     <div
                       className="upload-overall-fill"
-                      style={{
-                        width: `${progress}%`,
-                      }}
+                      style={{ width: `${progress}%` }}
                     />
                   </div>
                 </div>
@@ -810,9 +829,7 @@ export default function App() {
                         <div className="upload-item-track">
                           <div
                             className={`upload-item-fill ${item.status}`}
-                            style={{
-                              width: `${item.progress}%`,
-                            }}
+                            style={{ width: `${item.progress}%` }}
                           />
                         </div>
 
@@ -859,7 +876,12 @@ export default function App() {
                 </div>
               </div>
 
-              <FileList files={files} />
+              <FileList
+                files={files}
+                isHost={isCurrentHost}
+                roomId={roomId}
+                deviceId={deviceId}
+              />
             </section>
           </>
         )}

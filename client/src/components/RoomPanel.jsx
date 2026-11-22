@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Copy, Check, Plus, LogIn, DoorOpen } from "lucide-react";
 
-export default function RoomPanel({ roomId, onCreate, onJoin }) {
-  const [roomName, setRoomName] = useState("");
+export default function RoomPanel({ roomId, roomName, onCreate, onJoin }) {
+  const [inputRoomName, setInputRoomName] = useState("");
   const [joinId, setJoinId] = useState("");
   const [creating, setCreating] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -13,8 +13,8 @@ export default function RoomPanel({ roomId, onCreate, onJoin }) {
     setCreating(true);
 
     try {
-      await onCreate(roomName.trim() || "My Shared Room");
-      setRoomName("");
+      await onCreate(inputRoomName.trim() || "My Shared Room");
+      setInputRoomName("");
     } finally {
       setCreating(false);
     }
@@ -44,7 +44,6 @@ export default function RoomPanel({ roomId, onCreate, onJoin }) {
       {!roomId ? (
         <div className="room-options">
           {/* CREATE ROOM */}
-
           <div className="room-option-card">
             <div className="room-option-icon create-icon">
               <Plus size={23} />
@@ -59,8 +58,8 @@ export default function RoomPanel({ roomId, onCreate, onJoin }) {
             <input
               type="text"
               placeholder="Enter room name"
-              value={roomName}
-              onChange={(e) => setRoomName(e.target.value)}
+              value={inputRoomName}
+              onChange={(e) => setInputRoomName(e.target.value)}
               maxLength={40}
             />
 
@@ -75,7 +74,6 @@ export default function RoomPanel({ roomId, onCreate, onJoin }) {
           </div>
 
           {/* JOIN ROOM */}
-
           <div className="room-option-card">
             <div className="room-option-icon join-icon">
               <LogIn size={23} />
@@ -108,7 +106,6 @@ export default function RoomPanel({ roomId, onCreate, onJoin }) {
         </div>
       ) : (
         /* ACTIVE ROOM */
-
         <div className="active-room-card">
           <div className="active-room-info">
             <div className="active-room-icon">
@@ -125,7 +122,14 @@ export default function RoomPanel({ roomId, onCreate, onJoin }) {
           </div>
 
           <div className="room-id-box">
-            <div>
+            <div className="room-details">
+              <span>ROOM NAME</span>
+              <strong className="room-name-text">
+                {roomName || "My Shared Room"}
+              </strong>
+            </div>
+
+            <div className="room-details">
               <span>ROOM ID</span>
               <strong>{roomId}</strong>
             </div>

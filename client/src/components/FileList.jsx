@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import axios from "axios";
 
 import {
   File,
@@ -11,6 +12,8 @@ import {
   X,
   Search,
   SlidersHorizontal,
+  Trash2,
+  Loader2,
 } from "lucide-react";
 
 import { API_URL } from "../config";
@@ -96,15 +99,68 @@ function isPreviewSupported(type) {
   );
 }
 
-export default function FileList({ files = [] }) {
+export default function FileList({
+  files = [],
+  isHost = false,
+  roomId,
+  deviceId,
+}) {
   const [previewFile, setPreviewFile] = useState(null);
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("all");
   const [sortBy, setSortBy] = useState("newest");
 
+  // DELETE STATE
+
+  const [deletingId, setDeletingId] = useState(null);
+  const [deleteError, setDeleteError] = useState("");
+
   const closePreview = () => {
     setPreviewFile(null);
   };
+
+  // DELETE FILE
+
+  const handleDelete = async (item) => {
+    if (!isHost) return;
+
+    const confirmDelete = window.confirm(
+      `Are you sure you want to delete "${item.originalName}"?`,
+    );
+
+    if (!confirmDelete) return;
+
+    try {
+      setDeletingId(item._id);
+      setDeleteError("");
+
+      const response = await axios.delete(`${API_URL}/files/${item._id}`, {
+        data: {
+          roomId,
+          deviceId,
+        },
+      });
+
+      if (response.data.success) {
+        if (previewFile?._id === item._id) {
+          setPreviewFile(null);
+        }
+
+        // Socket event in App.jsx updates every connected device.
+      }
+    } catch (error) {
+      console.error("Delete File Error:", error);
+
+      setDeleteError(
+        error.response?.data?.message ||
+          "Unable to delete file. Please try again.",
+      );
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  // FILTER AND SORT
 
   const filteredFiles = useMemo(() => {
     let result = [...files];
@@ -168,6 +224,7 @@ export default function FileList({ files = [] }) {
   return (
     <>
       {/* FILE TOOLBAR */}
+
       <div className="file-toolbar">
         <div className="file-search">
           <Search size={19} />
@@ -230,12 +287,28 @@ export default function FileList({ files = [] }) {
         </div>
       </div>
 
+      {/* DELETE ERROR */}
+
+      {deleteError && (
+        <div className="message-banner">
+          <span>{deleteError}</span>
+
+          <button type="button" onClick={() => setDeleteError("")}>
+            ×
+          </button>
+        </div>
+      )}
+
       {/* FILE LIST */}
+
       {filteredFiles.length > 0 ? (
         <div className="file-list">
           {filteredFiles.map((item) => {
             const Icon = getIcon(item.mimeType);
+
             const previewSupported = isPreviewSupported(item.mimeType);
+
+            const isDeleting = deletingId === item._id;
 
             return (
               <div className="file-item" key={item._id}>
@@ -272,6 +345,24 @@ export default function FileList({ files = [] }) {
                   >
                     <Download size={19} />
                   </a>
+
+                  {/* HOST ONLY DELETE BUTTON */}
+
+                  {isHost && (
+                    <button
+                      className="delete-file-button"
+                      onClick={() => handleDelete(item)}
+                      disabled={isDeleting}
+                      title="Delete file"
+                      type="button"
+                    >
+                      {isDeleting ? (
+                        <Loader2 size={18} className="delete-spinner" />
+                      ) : (
+                        <Trash2 size={18} />
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
             );
@@ -297,6 +388,7 @@ export default function FileList({ files = [] }) {
       )}
 
       {/* FILE PREVIEW MODAL */}
+
       {previewFile && (
         <div className="preview-overlay" onClick={closePreview}>
           <div
@@ -306,6 +398,7 @@ export default function FileList({ files = [] }) {
             <div className="preview-header">
               <div className="preview-title">
                 <Eye size={19} />
+
                 <h3 title={previewFile.originalName}>
                   {previewFile.originalName}
                 </h3>
