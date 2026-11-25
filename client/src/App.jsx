@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+
 import axios from "axios";
+
 import { io } from "socket.io-client";
 
 import {
@@ -18,23 +20,26 @@ import {
 } from "lucide-react";
 
 import Header from "./components/Header";
+
 import RoomPanel from "./components/RoomPanel";
+
 import UploadZone from "./components/UploadZone";
+
 import FileList from "./components/FileList";
 
 import { API_URL, SERVER_URL } from "./config";
+
 import "./App.css";
 
 export default function App() {
   const socketRef = useRef(null);
-
   // DEVICE IDENTITY
-
   const [deviceId] = useState(() => {
     let savedId = localStorage.getItem("shareroom_deviceId");
 
     if (!savedId) {
       savedId = `device_${Math.random().toString(36).slice(2, 12)}`;
+
       localStorage.setItem("shareroom_deviceId", savedId);
     }
 
@@ -46,14 +51,13 @@ export default function App() {
 
     if (!savedName) {
       savedName = `Device-${Math.random().toString(36).slice(2, 7)}`;
+
       localStorage.setItem("shareroom_device", savedName);
     }
 
     return savedName;
   });
-
   // ROOM STATE
-
   const [roomId, setRoomId] = useState(
     () => localStorage.getItem("shareroom_roomId") || "",
   );
@@ -61,31 +65,27 @@ export default function App() {
   const [roomName, setRoomName] = useState("My Shared Room");
 
   const [joined, setJoined] = useState(false);
+
   const [connected, setConnected] = useState(false);
-
   // FILE STATE
-
   const [files, setFiles] = useState([]);
+
   const [uploading, setUploading] = useState(false);
+
   const [progress, setProgress] = useState(0);
+
   const [uploadItems, setUploadItems] = useState([]);
-
   // DEVICE STATE
-
   const [devices, setDevices] = useState([]);
+
   const [deviceCount, setDeviceCount] = useState(0);
+
   const [pendingRequests, setPendingRequests] = useState([]);
-
   // APPROVAL STATE
-
   const [pendingApproval, setPendingApproval] = useState(false);
-
   // MESSAGE
-
   const [message, setMessage] = useState("");
-
   // AUTO DISMISS MESSAGE
-
   useEffect(() => {
     if (!message) return;
 
@@ -95,26 +95,25 @@ export default function App() {
 
     return () => clearTimeout(timer);
   }, [message]);
-
   // AUTO HIDE UPLOAD DASHBOARD AFTER COMPLETION
-
   useEffect(() => {
     if (uploading || uploadItems.length === 0) return;
 
     const timer = setTimeout(() => {
       setUploadItems([]);
+
       setProgress(0);
     }, 4000);
 
     return () => clearTimeout(timer);
   }, [uploading, uploadItems]);
-
   // SOCKET CONNECTION
-
   useEffect(() => {
     const socket = io(SERVER_URL, {
       reconnection: true,
+
       reconnectionAttempts: Infinity,
+
       reconnectionDelay: 1000,
     });
 
@@ -130,7 +129,9 @@ export default function App() {
       if (savedRoom) {
         socket.emit("join-room", {
           roomId: savedRoom,
+
           deviceId,
+
           deviceName,
         });
       }
@@ -138,122 +139,116 @@ export default function App() {
 
     socket.on("disconnect", () => {
       setConnected(false);
+
       setJoined(false);
+
       setDevices([]);
+
       setDeviceCount(0);
     });
-
     // ROOM JOINED
-
     socket.on("room-joined", (data) => {
       const joinedRoom = data.roomId.toUpperCase();
 
       setRoomId(joinedRoom);
+
       setRoomName(data.roomName || "My Shared Room");
+
       setJoined(true);
+
       setPendingApproval(false);
+
       setMessage("");
 
       localStorage.setItem("shareroom_roomId", joinedRoom);
     });
-
     // ROOM ERROR
-
     socket.on("room-error", (error) => {
+      const errorMessage =
+        typeof error === "string"
+          ? error
+          : error?.message || "Something went wrong";
+
       setJoined(false);
       setFiles([]);
       setDevices([]);
       setPendingRequests([]);
       setDeviceCount(0);
       setPendingApproval(false);
-      setMessage(error);
+      setMessage(errorMessage);
 
-      if (error === "Invalid Room ID") {
+      if (
+        errorMessage === "Invalid Room ID" ||
+        errorMessage === "Room not found."
+      ) {
         localStorage.removeItem("shareroom_roomId");
         setRoomId("");
         setRoomName("My Shared Room");
       }
     });
-
     // DEVICE COUNT
-
-    socket.on("device-count", ({ count }) => {
-      setDeviceCount(count);
+    socket.on("device-count", (count) => {
+      setDeviceCount(typeof count === "number" ? count : count?.count || 0);
     });
-
     // DEVICE LIST
-
     socket.on("device-list", (deviceList) => {
       setDevices(deviceList);
     });
-
     // HOST CHANGED
-
-    socket.on("host-changed", ({ hostDeviceName }) => {
-      setMessage(`${hostDeviceName} is now the room host`);
+    socket.on("host-changed", ({ hostName }) => {
+      setMessage(`${hostName || "Another device"} is now the room host`);
     });
-
     // DEVICE REMOVED
-
     socket.on("device-removed", ({ message }) => {
       setJoined(false);
+
       setFiles([]);
+
       setDevices([]);
+
       setDeviceCount(0);
+
       setPendingRequests([]);
+
       setPendingApproval(false);
+
       setMessage(message);
     });
-
     // APPROVAL PENDING
-
     socket.on("approval-pending", ({ message }) => {
       setJoined(false);
+
       setPendingApproval(true);
+
       setMessage(message);
     });
-
     // APPROVAL GRANTED
-
     socket.on("approval-granted", ({ message }) => {
       setPendingApproval(false);
+
       setMessage(message);
     });
-
     // APPROVAL REJECTED
-
     socket.on("approval-rejected", ({ message }) => {
       setJoined(false);
+
       setPendingApproval(false);
+
       setMessage(message);
     });
-
     // HOST APPROVAL REQUEST
-
-    socket.on("device-approval-request", (request) => {
-      setPendingRequests((previous) => {
-        const exists = previous.some(
-          (item) => item.deviceId === request.deviceId,
-        );
-
-        if (exists) {
-          return previous.map((item) =>
-            item.deviceId === request.deviceId ? request : item,
-          );
-        }
-
-        return [...previous, request];
-      });
+    socket.on("device-approval-request", (data) => {
+      setPendingRequests(Array.isArray(data?.requests) ? data.requests : []);
     });
-
     // HOST ACTION ERROR
-
     socket.on("host-action-error", (error) => {
-      setMessage(error);
+      setMessage(
+        typeof error === "string"
+          ? error
+          : error?.message || "Host action failed",
+      );
     });
-
     // FILE SHARED
-
     socket.on("file-shared", (newFile) => {
       setFiles((previous) => {
         const exists = previous.some((file) => file._id === newFile._id);
@@ -263,9 +258,7 @@ export default function App() {
         return [newFile, ...previous];
       });
     });
-
     // FILE DELETED - REAL TIME UPDATE
-
     socket.on("file-deleted", ({ fileId }) => {
       setFiles((previous) => previous.filter((file) => file._id !== fileId));
 
@@ -274,12 +267,11 @@ export default function App() {
 
     return () => {
       socket.disconnect();
+
       socketRef.current = null;
     };
   }, [deviceId, deviceName]);
-
   // LOAD ROOM FILES
-
   useEffect(() => {
     if (!joined || !roomId) return;
 
@@ -290,46 +282,54 @@ export default function App() {
         setFiles(response.data.files || []);
       } catch (error) {
         console.error("Load Files Error:", error);
+
         setMessage("Unable to load shared files");
       }
     };
 
     loadFiles();
   }, [joined, roomId]);
-
   // CONNECT ROOM
-
   const connectRoom = (id, name = "My Shared Room") => {
     const cleanId = id.trim().toUpperCase();
 
     if (!cleanId) {
       setMessage("Please enter a Room ID");
+
       return;
     }
 
     if (!socketRef.current?.connected) {
       setMessage("Server connection unavailable");
+
       return;
     }
 
     setFiles([]);
+
     setDevices([]);
+
     setDeviceCount(0);
+
     setPendingRequests([]);
+
     setPendingApproval(false);
+
     setJoined(false);
+
     setRoomId(cleanId);
+
     setRoomName(name);
 
     socketRef.current.emit("join-room", {
       roomId: cleanId,
+
       deviceId,
+
       deviceName,
     });
   };
-
   // CREATE ROOM
-
   const createRoom = async (name) => {
     try {
       const response = await axios.post(`${API_URL}/rooms/create`, {
@@ -345,9 +345,7 @@ export default function App() {
       setMessage(error.response?.data?.message || "Unable to create room");
     }
   };
-
   // JOIN ROOM
-
   const joinRoom = async (id) => {
     try {
       const cleanId = id.trim().toUpperCase();
@@ -363,12 +361,11 @@ export default function App() {
       setMessage(error.response?.data?.message || "Invalid Room ID");
     }
   };
-
   // UPLOAD FILES WITH INDIVIDUAL PROGRESS
-
   const uploadFiles = async (selectedFiles) => {
     if (!joined || !roomId) {
       setMessage("Join a room before uploading");
+
       return;
     }
 
@@ -376,22 +373,31 @@ export default function App() {
 
     const items = Array.from(selectedFiles).map((file) => ({
       id: `${file.name}-${file.size}-${Math.random()}`,
+
       name: file.name,
+
       size: file.size,
+
       progress: 0,
+
       status: "waiting",
+
       error: "",
     }));
 
     setUploadItems(items);
+
     setUploading(true);
+
     setProgress(0);
+
     setMessage("");
 
     let completedCount = 0;
 
     for (let index = 0; index < selectedFiles.length; index++) {
       const file = selectedFiles[index];
+
       const itemId = items[index].id;
 
       setUploadItems((previous) =>
@@ -404,7 +410,9 @@ export default function App() {
         const formData = new FormData();
 
         formData.append("file", file);
+
         formData.append("roomId", roomId);
+
         formData.append("uploadedBy", deviceName);
 
         await axios.post(`${API_URL}/files/upload`, formData, {
@@ -434,7 +442,9 @@ export default function App() {
             item.id === itemId
               ? {
                   ...item,
+
                   progress: 100,
+
                   status: "completed",
                 }
               : item,
@@ -450,7 +460,9 @@ export default function App() {
             item.id === itemId
               ? {
                   ...item,
+
                   status: "failed",
+
                   error: error.response?.data?.message || "Upload failed",
                 }
               : item,
@@ -465,14 +477,13 @@ export default function App() {
 
     if (failedCount === 0) {
       setProgress(100);
+
       setMessage("All files uploaded successfully");
     } else {
       setMessage(`${completedCount} uploaded, ${failedCount} failed`);
     }
   };
-
   // REMOVE DEVICE
-
   const removeDevice = (targetDeviceId) => {
     const target = devices.find((device) => device.deviceId === targetDeviceId);
 
@@ -480,6 +491,7 @@ export default function App() {
 
     if (target.isHost) {
       setMessage("Host device cannot be removed");
+
       return;
     }
 
@@ -493,9 +505,7 @@ export default function App() {
       deviceId: targetDeviceId,
     });
   };
-
   // APPROVE DEVICE
-
   const approveDevice = (targetDeviceId) => {
     socketRef.current?.emit("approve-device", {
       deviceId: targetDeviceId,
@@ -505,9 +515,7 @@ export default function App() {
       previous.filter((item) => item.deviceId !== targetDeviceId),
     );
   };
-
   // REJECT DEVICE
-
   const rejectDevice = (targetDeviceId) => {
     socketRef.current?.emit("reject-device", {
       deviceId: targetDeviceId,
@@ -517,14 +525,13 @@ export default function App() {
       previous.filter((item) => item.deviceId !== targetDeviceId),
     );
   };
-
   // LEAVE ROOM
-
   const leaveRoom = () => {
     if (!joined) return;
 
     if (uploading) {
       setMessage("Please wait until upload finishes");
+
       return;
     }
 
@@ -539,21 +546,28 @@ export default function App() {
     localStorage.removeItem("shareroom_roomId");
 
     setRoomId("");
+
     setRoomName("My Shared Room");
+
     setJoined(false);
+
     setFiles([]);
+
     setDevices([]);
+
     setPendingRequests([]);
+
     setPendingApproval(false);
+
     setDeviceCount(0);
+
     setProgress(0);
+
     setUploadItems([]);
 
     setMessage("You left the room successfully");
   };
-
   // REFRESH FILES
-
   const refreshFiles = async () => {
     if (!roomId) return;
 
@@ -561,20 +575,17 @@ export default function App() {
       const response = await axios.get(`${API_URL}/files/room/${roomId}`);
 
       setFiles(response.data.files || []);
+
       setMessage("Files refreshed successfully");
     } catch {
       setMessage("Unable to refresh files");
     }
   };
-
   // HOST CHECK
-
   const isCurrentHost = devices.some(
     (device) => device.deviceId === deviceId && device.isHost,
   );
-
   // UPLOAD SUMMARY
-
   const completedUploads = uploadItems.filter(
     (item) => item.status === "completed",
   ).length;
@@ -582,9 +593,7 @@ export default function App() {
   const failedUploads = uploadItems.filter(
     (item) => item.status === "failed",
   ).length;
-
   // RENDER
-
   return (
     <div className="app">
       <Header
@@ -612,6 +621,7 @@ export default function App() {
                 <div className="notification-content">
                   <div className="notification-title">
                     <h3>Device Access Request</h3>
+
                     <span>NEW</span>
                   </div>
 
@@ -721,6 +731,7 @@ export default function App() {
 
                 <div>
                   <span>Connected Devices</span>
+
                   <h2>{deviceCount}</h2>
                 </div>
               </div>
@@ -732,6 +743,7 @@ export default function App() {
 
                 <div>
                   <span>Shared Files</span>
+
                   <h2>{files.length}</h2>
                 </div>
               </div>
@@ -743,6 +755,7 @@ export default function App() {
 
                 <div>
                   <span>Room Status</span>
+
                   <h2 className="active-text">Active</h2>
                 </div>
               </div>
@@ -777,6 +790,7 @@ export default function App() {
                 <div className="upload-overall">
                   <div className="upload-overall-info">
                     <span>Overall Progress</span>
+
                     <strong>{progress}%</strong>
                   </div>
 
@@ -860,6 +874,7 @@ export default function App() {
               <div className="files-heading">
                 <div>
                   <h2>Shared Files</h2>
+
                   <p>Files available in this room</p>
                 </div>
 
